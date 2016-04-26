@@ -206,15 +206,15 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
           return
         }
 
+        let nextStoreState = this.store.getState()
+
+        if (nextStoreState === this.storeState) {
+          return
+        }
+
+        this.storeState = nextStoreState
+
         this.setState((previousState, currentProps) => {
-          let nextStoreState = this.store.getState()
-
-          if (nextStoreState === this.storeState) {
-            return
-          }
-
-          this.storeState = nextStoreState
-
           let nextStateProps = this.computeStateProps(this.store, currentProps)
           let nextDispatchProps = this.computeDispatchProps(this.store, currentProps)
 
