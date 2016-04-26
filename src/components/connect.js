@@ -19,16 +19,6 @@ function getDisplayName(WrappedComponent) {
   return WrappedComponent.displayName || WrappedComponent.name || 'Component'
 }
 
-let errorObject = { value: null }
-function tryCatch(fn, ctx) {
-  try {
-    return fn.apply(ctx)
-  } catch (e) {
-    errorObject.value = e
-    return errorObject
-  }
-}
-
 // Helps track hot reloading.
 let nextVersion = 0
 
@@ -47,7 +37,6 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
 
   const finalMergeProps = mergeProps || defaultMergeProps
   const { pure = true, withRef = false } = options
-  const checkMergedEquals = pure && finalMergeProps !== defaultMergeProps
 
   // Helps track hot reloading.
   const version = nextVersion++
@@ -73,8 +62,8 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
     }
 
     class Connect extends Component {
-      shouldComponentUpdate() {
-        return !pure || this.haveOwnPropsChanged || this.hasStoreStateChanged
+      shouldComponentUpdate(nextProps, nextState) {
+        return !pure || !shallowEqual(nextState.mergedProps, this.state.mergedProps)
       }
 
       constructor(props, context) {
@@ -89,9 +78,12 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
           `or explicitly pass "store" as a prop to "${connectDisplayName}".`
         )
 
-        const storeState = this.store.getState()
-        this.state = { storeState }
-        this.clearCache()
+        this.storeState = this.store.getState()
+        this.stateProps = this.computeStateProps(this.store, this.props)
+        this.dispatchProps = this.computeDispatchProps(this.store, this.props)
+        this.state = {
+          mergedProps: computeMergedProps(this.stateProps, this.dispatchProps, this.props)
+        }
       }
 
       computeStateProps(store, props) {
@@ -160,36 +152,6 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
         return mappedDispatch
       }
 
-      updateStatePropsIfNeeded() {
-        const nextStateProps = this.computeStateProps(this.store, this.props)
-        if (this.stateProps && shallowEqual(nextStateProps, this.stateProps)) {
-          return false
-        }
-
-        this.stateProps = nextStateProps
-        return true
-      }
-
-      updateDispatchPropsIfNeeded() {
-        const nextDispatchProps = this.computeDispatchProps(this.store, this.props)
-        if (this.dispatchProps && shallowEqual(nextDispatchProps, this.dispatchProps)) {
-          return false
-        }
-
-        this.dispatchProps = nextDispatchProps
-        return true
-      }
-
-      updateMergedPropsIfNeeded() {
-        const nextMergedProps = computeMergedProps(this.stateProps, this.dispatchProps, this.props)
-        if (this.mergedProps && checkMergedEquals && shallowEqual(nextMergedProps, this.mergedProps)) {
-          return false
-        }
-
-        this.mergedProps = nextMergedProps
-        return true
-      }
-
       isSubscribed() {
         return typeof this.unsubscribe === 'function'
       }
@@ -213,9 +175,17 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
       }
 
       componentWillReceiveProps(nextProps) {
-        if (!pure || !shallowEqual(nextProps, this.props)) {
-          this.haveOwnPropsChanged = true
+        if (this.doStatePropsDependOnOwnProps) {
+          this.stateProps = this.computeStateProps(this.store, nextProps)
         }
+
+        if (this.doDispatchPropsDependOnOwnProps) {
+          this.dispatchProps = this.computeDispatchProps(this.store, nextProps)
+        }
+
+        this.setState({
+          mergedProps: computeMergedProps(this.stateProps, this.dispatchProps, nextProps)
+        })
       }
 
       componentWillUnmount() {
@@ -224,14 +194,9 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
       }
 
       clearCache() {
+        this.storeState = null
         this.dispatchProps = null
         this.stateProps = null
-        this.mergedProps = null
-        this.haveOwnPropsChanged = true
-        this.hasStoreStateChanged = true
-        this.haveStatePropsBeenPrecalculated = false
-        this.statePropsPrecalculationError = null
-        this.renderedElement = null
         this.finalMapDispatchToProps = null
         this.finalMapStateToProps = null
       }
@@ -241,25 +206,32 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
           return
         }
 
-        const storeState = this.store.getState()
-        const prevStoreState = this.state.storeState
-        if (pure && prevStoreState === storeState) {
-          return
-        }
+        this.setState((previousState, currentProps) => {
+          let nextStoreState = this.store.getState()
 
-        if (pure && !this.doStatePropsDependOnOwnProps) {
-          const haveStatePropsChanged = tryCatch(this.updateStatePropsIfNeeded, this)
-          if (!haveStatePropsChanged) {
+          if (nextStoreState === this.storeState) {
             return
           }
-          if (haveStatePropsChanged === errorObject) {
-            this.statePropsPrecalculationError = errorObject.value
-          }
-          this.haveStatePropsBeenPrecalculated = true
-        }
 
-        this.hasStoreStateChanged = true
-        this.setState({ storeState })
+          this.storeState = nextStoreState
+
+          let nextStateProps = this.computeStateProps(this.store, currentProps)
+          let nextDispatchProps = this.computeDispatchProps(this.store, currentProps)
+
+          let statePropsChanged = this.stateProps && !shallowEqual(nextStateProps, this.stateProps)
+          let dispatchPropsChanged = this.dispatchProps && !shallowEqual(nextDispatchProps, this.dispatchProps)
+
+          if (!statePropsChanged && !dispatchPropsChanged) {
+            return
+          }
+
+          this.stateProps = nextStateProps
+          this.dispatchProps = nextDispatchProps
+
+          return {
+            mergedProps: computeMergedProps(this.stateProps, this.dispatchProps, currentProps)
+          }
+        })
       }
 
       getWrappedInstance() {
@@ -272,71 +244,16 @@ export default function connect(mapStateToProps, mapDispatchToProps, mergeProps,
       }
 
       render() {
-        const {
-          haveOwnPropsChanged,
-          hasStoreStateChanged,
-          haveStatePropsBeenPrecalculated,
-          statePropsPrecalculationError,
-          renderedElement
-        } = this
-
-        this.haveOwnPropsChanged = false
-        this.hasStoreStateChanged = false
-        this.haveStatePropsBeenPrecalculated = false
-        this.statePropsPrecalculationError = null
-
-        if (statePropsPrecalculationError) {
-          throw statePropsPrecalculationError
-        }
-
-        let shouldUpdateStateProps = true
-        let shouldUpdateDispatchProps = true
-        if (pure && renderedElement) {
-          shouldUpdateStateProps = hasStoreStateChanged || (
-            haveOwnPropsChanged && this.doStatePropsDependOnOwnProps
-          )
-          shouldUpdateDispatchProps =
-            haveOwnPropsChanged && this.doDispatchPropsDependOnOwnProps
-        }
-
-        let haveStatePropsChanged = false
-        let haveDispatchPropsChanged = false
-        if (haveStatePropsBeenPrecalculated) {
-          haveStatePropsChanged = true
-        } else if (shouldUpdateStateProps) {
-          haveStatePropsChanged = this.updateStatePropsIfNeeded()
-        }
-        if (shouldUpdateDispatchProps) {
-          haveDispatchPropsChanged = this.updateDispatchPropsIfNeeded()
-        }
-
-        let haveMergedPropsChanged = true
-        if (
-          haveStatePropsChanged ||
-          haveDispatchPropsChanged ||
-          haveOwnPropsChanged
-        ) {
-          haveMergedPropsChanged = this.updateMergedPropsIfNeeded()
-        } else {
-          haveMergedPropsChanged = false
-        }
-
-        if (!haveMergedPropsChanged && renderedElement) {
-          return renderedElement
-        }
-
         if (withRef) {
-          this.renderedElement = createElement(WrappedComponent, {
-            ...this.mergedProps,
+          return createElement(WrappedComponent, {
+            ...this.state.mergedProps,
             ref: 'wrappedInstance'
           })
         } else {
-          this.renderedElement = createElement(WrappedComponent,
-            this.mergedProps
+          return createElement(WrappedComponent,
+            this.state.mergedProps
           )
         }
-
-        return this.renderedElement
       }
     }
 
